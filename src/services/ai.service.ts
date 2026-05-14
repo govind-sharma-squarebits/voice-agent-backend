@@ -1,46 +1,74 @@
 import { GoogleGenerativeAI, ChatSession, Content, GenerativeModel } from '@google/generative-ai';
-import dotenv from 'dotenv';
+import { config } from '../config/index.js';
 
-dotenv.config();
+/**
+ * Fallback chain uses current model IDs for the Generative Language API.
+ * Legacy ids (gemini-1.5-* without version, gemini-1.0-pro) often 404 on v1beta.
+ */
+const MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-2.5-pro',
+];
 
 export class AIService {
   private genAI: GoogleGenerativeAI;
-  private model: GenerativeModel;
-  private chatSession: ChatSession;
+  private model!: GenerativeModel;
+  private chatSession!: ChatSession;
   private history: Content[] = [];
+  private activeModelIndex: number = 0;
 
   constructor() {
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
-    this.genAI = new GoogleGenerativeAI(apiKey!);
-    this.model = this.genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash-lite',
-      systemInstruction: `You are 'Astra', a highly intelligent and empathetic AI voice assistant. 
-      Your goals:
-      1. Be extremely conversational and human-like.
-      2. Keep responses short (1-3 sentences) because you are talking, not writing.
-      3. Never use markdown or bolding. Speak in plain text.`,
-    });
+    if (!config.GEMINI_API_KEY) {
+      throw new Error("Missing Gemini API Key");
+    }
 
-    this.chatSession = this.model.startChat({
-      history: this.history,
-    });
+    this.genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY);
+    this.initializeModel(MODELS[0]);
   }
 
-  public async getStreamingResponse(text: string) {
+  private initializeModel(modelName: string) {
+    try {
+      this.model = this.genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: `You are Astra, a helpful voice assistant. Keep responses very short (1-2 sentences).`,
+      });
+
+      this.chatSession = this.model.startChat({
+        history: this.history,
+      });
+      
+      console.log(`📡 [PROD] Model Active: ${modelName}`);
+    } catch (error) {
+      console.error(`❌ Failed to init ${modelName}:`, error);
+    }
+  }
+
+  public async getStreamingResponse(text: string): Promise<any> {
     try {
       const result = await this.chatSession.sendMessageStream(text);
       return result.stream;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('❌ Gemini API Error:', errorMessage);
-      throw error;
+    } catch (error: any) {
+      // Automatic Fallback through the chain
+      if (this.activeModelIndex < MODELS.length - 1) {
+        this.activeModelIndex++;
+        const nextModel = MODELS[this.activeModelIndex];
+        console.warn(`⚠️ Model ${MODELS[this.activeModelIndex - 1]} failed. Trying fallback: ${nextModel}...`);
+        this.initializeModel(nextModel);
+        return this.getStreamingResponse(text);
+      }
+
+      console.error('❌ AI Engine Exhausted:', error.message);
+      throw new Error('AI Service Unavailable');
     }
   }
 
   public addToHistory(role: 'assistant' | 'user', content: string) {
+    if (!content) return;
     this.history.push({
       role: role === 'assistant' ? 'model' : 'user',
       parts: [{ text: content }],
     });
+    if (this.history.length > 20) this.history = this.history.slice(-20);
   }
 }
