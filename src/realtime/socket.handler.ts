@@ -71,6 +71,7 @@ export const setupSocketHandlers = (io: Server) => {
     });
 
     socket.on('wake-up', async () => {
+      console.log(`🔔 [PROD] Wake-up received from client: ${socket.id}`);
       try {
         const greeting = "Hello! I'm listening. How can I help you today?";
         socket.emit('ai-text-partial', greeting);
