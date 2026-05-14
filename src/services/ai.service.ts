@@ -31,7 +31,7 @@ export class AIService {
     try {
       this.model = this.genAI.getGenerativeModel({
         model: modelName,
-        systemInstruction: `You are Astra, a helpful voice assistant. Keep responses very short (1-2 sentences).`,
+        systemInstruction: `You are a professional, helpful AI voice assistant. Keep responses very short, natural, and concise (1-2 sentences maximum). Do not mention your name or that you are an AI. Sound like a real person helping over the phone.`,
       });
 
       this.chatSession = this.model.startChat({
