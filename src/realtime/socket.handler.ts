@@ -17,6 +17,27 @@ export const setupSocketHandlers = (io: Server) => {
     socket.on('chat-message', async (text: string) => {
       if (!text?.trim()) return;
 
+      const lowerText = text.toLowerCase().trim();
+      
+      // Keywords that indicate "just visiting" intent
+      const visitingKeywords = [
+        'visit', 'exploring', 'looking around', 'just looking', 
+        'browsing', 'checking out', 'just come', 'viewing'
+      ];
+
+      const isVisitingIntent = visitingKeywords.some(keyword => lowerText.includes(keyword));
+
+      // Custom reply for visiting intent
+      if (isVisitingIntent) {
+        const reply = "ok if you want to call me back just say hey govind voice agent";
+        socket.emit('ai-text-partial', reply);
+        await voiceService.streamTTS(reply);
+        socket.emit('ai-response', reply);
+        // Signal to frontend to close UI after speaking
+        socket.emit('close-ui');
+        return;
+      }
+
       try {
         voiceService.resetInterrupt();
         
@@ -70,10 +91,21 @@ export const setupSocketHandlers = (io: Server) => {
       }
     });
 
+    socket.on('speak', async (text: string) => {
+      console.log(`🗣️ [PROD] Speak requested: "${text}" from ${socket.id}`);
+      try {
+        socket.emit('ai-text-partial', text);
+        await voiceService.streamTTS(text);
+        socket.emit('ai-response', text);
+      } catch (error) {
+        console.error(`❌ [PROD] Speak Error [${socket.id}]:`, error);
+      }
+    });
+
     socket.on('wake-up', async () => {
       console.log(`🔔 [PROD] Wake-up received from client: ${socket.id}`);
       try {
-        const greeting = "How can I help you today?";
+        const greeting = "Hi did you like the website? Do you need any service or want to discuss any business idea?";
         socket.emit('ai-text-partial', greeting);
         await voiceService.streamTTS(greeting);
         socket.emit('ai-response', greeting);
