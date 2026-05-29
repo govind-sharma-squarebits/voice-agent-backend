@@ -1,121 +1,80 @@
 import { Server, Socket } from 'socket.io';
-import { AIService } from '../services/ai.service.js';
-import { VoiceService } from '../services/voice.service.js';
+import { ConversationOrchestrator } from '../services/conversation.orchestrator.js';
+import { SocketRateLimiter } from '../middleware/rate.limit.middleware.js';
+import { socketLogger } from '../utils/logger.js';
+import type { ChatMessagePayload, LeadStepPayload } from '../types/index.js';
 
-/**
- * Production-Grade Socket Handler.
- * Manages per-connection AI and Voice state with stream protection.
- */
-export const setupSocketHandlers = (io: Server) => {
+export const setupSocketHandlers = (
+  io: Server,
+  orchestrator: ConversationOrchestrator,
+): void => {
+  const rateLimiter = new SocketRateLimiter();
+
   io.on('connection', (socket: Socket) => {
-    console.log(`📡 [PROD] Client connected: ${socket.id}`);
-    
-    // Services localized to this session
-    const voiceService = new VoiceService(socket);
-    const aiService = new AIService();
+    const sessionId = socket.id;
+    socketLogger.info({ socketId: socket.id }, 'Client connected');
 
-    socket.on('chat-message', async (text: string) => {
-      if (!text?.trim()) return;
+    // ── Inbound Event Routing (thin — no business logic here) ─────
 
-      const lowerText = text.toLowerCase().trim();
-      
-      // Keywords that indicate "just visiting" intent
-      const visitingKeywords = [
-        'visit', 'exploring', 'looking around', 'just looking', 
-        'browsing', 'checking out', 'just come', 'viewing'
-      ];
+    socket.on('session:init', () => {
+      socketLogger.debug({ sessionId }, 'session:init received');
+      orchestrator.handleSessionInit(sessionId, socket).catch(err => {
+        socketLogger.error({ sessionId, error: String(err) }, 'session:init error');
+      });
+    });
 
-      const isVisitingIntent = visitingKeywords.some(keyword => lowerText.includes(keyword));
+    socket.on('chat:message', (payload: ChatMessagePayload) => {
+      if (!payload?.content?.trim()) return;
 
-      // Custom reply for visiting intent
-      if (isVisitingIntent) {
-        const reply = "ok if you want to call me back just say hey govind voice agent";
-        socket.emit('ai-text-partial', reply);
-        await voiceService.streamTTS(reply);
-        socket.emit('ai-response', reply);
-        // Signal to frontend to close UI after speaking
-        socket.emit('close-ui');
+      if (!rateLimiter.isAllowed(sessionId)) {
+        socketLogger.warn({ sessionId }, 'Socket rate limit exceeded');
+        socket.emit('error', { code: 'RATE_LIMITED', message: 'Too many messages. Please slow down.' });
         return;
       }
+      rateLimiter.increment(sessionId);
 
-      try {
-        voiceService.resetInterrupt();
-        
-        const aiStream = await aiService.getStreamingResponse(text);
-        let fullResponse = '';
-        let sentenceBuffer = '';
-
-        for await (const chunk of aiStream) {
-          const content = chunk.text();
-          if (!content) continue;
-
-          // Stream Delta Calculation
-          let delta = content;
-          if (fullResponse && content.startsWith(fullResponse)) {
-            delta = content.slice(fullResponse.length);
-          }
-          if (!delta) continue;
-
-          fullResponse += delta;
-          sentenceBuffer += delta;
-          
-          socket.emit('ai-text-partial', delta);
-
-          // Sentence splitting for natural speech latency
-          if (/[.!?]/.test(sentenceBuffer)) {
-            const parts = sentenceBuffer.split(/([.!?])/);
-            while (parts.length > 2) {
-              const sentence = (parts.shift()! + parts.shift()!).trim();
-              if (sentence) {
-                await voiceService.streamTTS(sentence);
-              }
-            }
-            sentenceBuffer = parts.join('');
-          }
-        }
-
-        // Finalize conversation
-        if (sentenceBuffer.trim()) {
-          await voiceService.streamTTS(sentenceBuffer.trim());
-        }
-
-        socket.emit('ai-response', fullResponse);
-        aiService.addToHistory('user', text);
-        aiService.addToHistory('assistant', fullResponse);
-        
-        console.log(`✅ Streaming completed for session: ${socket.id}`);
-
-      } catch (error: any) {
-        console.error(`❌ [PROD] AI Stream Error [${socket.id}]:`, error.message || error);
-        socket.emit('error', 'The AI is taking a moment to recover. Please try again.');
-      }
+      socketLogger.debug({ sessionId, contentLength: payload.content.length }, 'chat:message received');
+      orchestrator.handleTextMessage(sessionId, payload.content, socket).catch(err => {
+        socketLogger.error({ sessionId, error: String(err) }, 'chat:message error');
+      });
     });
 
-    socket.on('speak', async (text: string) => {
-      console.log(`🗣️ [PROD] Speak requested: "${text}" from ${socket.id}`);
-      try {
-        socket.emit('ai-text-partial', text);
-        await voiceService.streamTTS(text);
-        socket.emit('ai-response', text);
-      } catch (error) {
-        console.error(`❌ [PROD] Speak Error [${socket.id}]:`, error);
-      }
+    socket.on('audio:chunk', (chunk: Buffer) => {
+      socketLogger.debug({ sessionId, bytes: chunk?.length ?? 0 }, 'audio:chunk received');
+      orchestrator.handleAudioChunk(sessionId, chunk, socket).catch(err => {
+        socketLogger.error({ sessionId, error: String(err) }, 'audio:chunk error');
+      });
     });
 
-    socket.on('wake-up', async () => {
-      console.log(`🔔 [PROD] Wake-up received from client: ${socket.id}`);
-      try {
-        const greeting = "Hi did you like the website? Do you need any service or want to discuss any business idea?";
-        socket.emit('ai-text-partial', greeting);
-        await voiceService.streamTTS(greeting);
-        socket.emit('ai-response', greeting);
-      } catch (error) {
-        console.error(`❌ [PROD] Wake-up Error [${socket.id}]:`, error);
-      }
+    socket.on('audio:turn:end', () => {
+      socketLogger.debug({ sessionId }, 'audio:turn:end received');
+      orchestrator.handleAudioTurnEnd(sessionId, socket).catch(err => {
+        socketLogger.error({ sessionId, error: String(err) }, 'audio:turn:end error');
+      });
     });
 
-    socket.on('disconnect', () => {
-      console.log(`📡 [PROD] Client disconnected: ${socket.id}`);
+    socket.on('audio:interrupted', () => {
+      socketLogger.debug({ sessionId }, 'audio:interrupted received (barge-in)');
+      orchestrator.cancelActiveTTS(sessionId);
+    });
+
+    socket.on('lead:step', (payload: LeadStepPayload) => {
+      if (!payload?.value?.trim()) return;
+      socketLogger.debug({ sessionId }, 'lead:step received');
+      orchestrator.handleLeadStep(sessionId, payload.value, socket).catch(err => {
+        socketLogger.error({ sessionId, error: String(err) }, 'lead:step error');
+      });
+    });
+
+    socket.on('session:close', () => {
+      socketLogger.debug({ sessionId }, 'session:close received');
+      orchestrator.handleSessionClose(sessionId).catch(() => {});
+    });
+
+    socket.on('disconnect', (reason: string) => {
+      rateLimiter.cleanup(sessionId);
+      orchestrator.handleSessionClose(sessionId).catch(() => {});
+      socketLogger.info({ socketId: socket.id, reason }, 'Client disconnected');
     });
   });
 };

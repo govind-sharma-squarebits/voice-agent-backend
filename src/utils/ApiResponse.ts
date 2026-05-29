@@ -1,19 +1,30 @@
-export class ApiResponse<T = any> {
-  public success: boolean;
-  
-  constructor(
-    public statusCode: number,
-    public data: T,
-    public message: string = "Success"
+export class ApiResponse {
+  static success<T>(data: T, message = 'Success', statusCode = 200) {
+    return { success: true, statusCode, message, data };
+  }
+
+  static error(message: string, statusCode = 500, code = 'INTERNAL_ERROR') {
+    return { success: false, statusCode, code, message };
+  }
+
+  static paginated<T>(
+    data: T[],
+    total: number,
+    page: number,
+    limit: number,
+    message = 'Success',
   ) {
-    this.success = statusCode < 400;
-  }
-
-  static success<T>(data: T, message: string = "Success", statusCode: number = 200) {
-    return new ApiResponse(statusCode, data, message);
-  }
-
-  static error(message: string = "Error", statusCode: number = 500) {
-    return new ApiResponse(statusCode, null, message);
+    return {
+      success: true,
+      statusCode: 200,
+      message,
+      data,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 }

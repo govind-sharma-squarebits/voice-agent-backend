@@ -1,18 +1,28 @@
 import { Request, Response, NextFunction } from 'express';
+import { AppError } from '../types/index.js';
+import { logger } from '../utils/logger.js';
 
-interface CustomError extends Error {
-  status?: number;
-}
+export const errorHandler = (
+  err: unknown,
+  req: Request,
+  res: Response,
+  _next: NextFunction,
+): void => {
+  if (err instanceof AppError) {
+    logger.warn({ code: err.code, path: req.path, status: err.statusCode }, err.message);
+    res.status(err.statusCode).json({
+      success: false,
+      code: err.code,
+      message: err.message,
+    });
+    return;
+  }
 
-export const errorHandler = (err: CustomError, req: Request, res: Response, next: NextFunction) => {
-  console.error('❌ Error:', err.stack);
-
-  const status = err.status || 500;
-  const message = err.message || 'Internal Server Error';
-
-  res.status(status).json({
+  const message = err instanceof Error ? err.message : 'An unexpected error occurred';
+  logger.error({ path: req.path, error: message }, 'Unhandled error');
+  res.status(500).json({
     success: false,
-    message,
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+    code: 'INTERNAL_ERROR',
+    message: 'An unexpected error occurred',
   });
 };
